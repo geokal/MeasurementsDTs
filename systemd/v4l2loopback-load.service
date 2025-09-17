@@ -1,0 +1,13 @@
+[#] Template unit to load v4l2loopback at boot
+[Unit]
+Description=Load v4l2loopback kernel module at boot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/modprobe v4l2loopback
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
