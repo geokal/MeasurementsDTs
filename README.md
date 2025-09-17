@@ -123,3 +123,17 @@ python3 dev_tools/stream_video_server.py
 ```
 
 This will start a local Flask server streaming video from `unit_tests/video/giphy.gif` at `http://<your-ip>:8080/video_feed`
+
+## Post‑Reboot Kernel Check
+
+- Script: run `scripts/check_hwe_gpu.sh` after upgrading to HWE on Ubuntu 20.04. It reports kernel (expect 5.15.x), HWE meta packages, DKMS, NVIDIA, v4l2loopback, firmware, and Secure Boot state.
+- Expected: `uname -r` shows a 5.15.x kernel; `dkms status` lists modules built for that kernel; `nvidia-smi` works if an NVIDIA GPU is present.
+- If NVIDIA modules aren’t loading:
+  - Check Secure Boot: `mokutil --sb-state` (EFI only). Either disable Secure Boot in firmware or sign modules.
+  - Rebuild DKMS for current kernel: `sudo dkms autoinstall -k $(uname -r)`
+  - Load modules: `sudo modprobe nvidia` (and optionally `sudo modprobe v4l2loopback`)
+- Quick module signing (if Secure Boot is enabled):
+  - Create a MOK keypair: `openssl req -new -x509 -newkey rsa:2048 -keyout MOK.key -out MOK.crt -nodes -days 36500 -subj "/CN=Local DKMS MOK/"`
+  - Enroll key: `sudo mokutil --import MOK.crt` then reboot and enroll in the MOK manager.
+  - Sign NVIDIA module: `sudo /usr/src/linux-headers-$(uname -r)/scripts/sign-file sha256 MOK.key MOK.crt $(modinfo -n nvidia)`
+  - Reboot and verify with `nvidia-smi`.

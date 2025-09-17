@@ -6,6 +6,7 @@ import glob
 import time
 import torch
 import numpy as np
+import av # Import PyAV
 
 try:
     import PyNvCodec as nvc
@@ -57,8 +58,11 @@ class BaseHPE(ABC):
         self.decoder = None
         self.to_rgb_converter = None
         self.to_tensor_converter = None
-        self.cap = None # Keep for non-PyNvCodec paths or fallback
+        self.cap = None # Keep for non-PyNvCodec/PyAV paths or fallback
         self.is_pynvcodec_enabled = False
+        self.is_pyav_enabled = False # New flag for PyAV
+        self.container = None
+        self.stream = None
 
         self.json = enable_json
         self.csv = enable_csv
@@ -100,24 +104,29 @@ class BaseHPE(ABC):
             elif input_src.startswith("http") or (not input_src.isdigit() and (input_src.endswith('.mp4') or input_src.endswith('.avi') or input_src.endswith('.mov'))):
                 # Use PyNvCodec for video streams and files
                 if nvc is None:
-                    print("[ERROR] PyNvCodec not available. Falling back to OpenCV for video decoding.")
-                    self.input_type = "video" # Treat as generic video for OpenCV
-                    self._init_opencv_video_capture(input_src)
+                    print("[ERROR] PyNvCodec not available. Attempting to use PyAV for video decoding.")
+                    try:
+                        self._init_pyav_video_capture(input_src)
+                        self.input_type = "video"
+                    except Exception as e:
+                        print(f"[ERROR] Failed to initialize PyAV: {e}. Falling back to OpenCV for video decoding.")
+                        self.input_type = "video" # Treat as generic video for OpenCV
+                        self._init_opencv_video_capture(input_src)
                 else:
                     self.input_type = "video" # Treat all PyNvCodec inputs as video
                     self._init_pynvcodec_video_capture(input_src)
             elif input_src.isdigit():
-                # Webcam input (OpenCV only for now, PyNvCodec for webcam is more complex)
+                # Webcam input (OpenCV only for now, PyNvCodec/PyAV for webcam is more complex)
                 self.input_type = "webcam"
                 self._init_opencv_video_capture(int(input_src))
             else:
-                raise ValueError("No valid input source provided or unsupported file type for PyNvCodec.")
+                raise ValueError("No valid input source provided or unsupported file type.")
                 
             self.set_padding()
         else:
             raise ValueError("No valid input source provided")
             
-        self.input_src = input_src  
+        self.input_src = input_src
 
         if (self.input_type == "directory" or self.input_type == "image") and self.save_video:
             raise ValueError("Image input - video output not supported!")
@@ -127,7 +136,6 @@ class BaseHPE(ABC):
             filename = os.path.join(self.output_dir, "video.avi")
             self.output = cv2.VideoWriter(filename, fourcc, self.video_fps, (self.img_w, self.img_h))
 
-    @abstractmethod
     def _init_opencv_video_capture(self, input_src):
         if isinstance(input_src, str) and input_src.startswith("http"):
             print(f"Attempting to connect to IP stream at {input_src} using OpenCV...")
@@ -148,9 +156,9 @@ class BaseHPE(ABC):
                 raise ValueError(f"Failed to connect to video stream after {max_retries} attempts: {input_src}")
             time.sleep(0.5) # Give OpenCV a small buffer time to fetch metadata
         else:
-            self.cap = cv2.VideoCapture(input_src)
-            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-            self.cap.set(cv2.CAP_PROP_FOCUS, 0)
+                self.cap = cv2.VideoCapture(input_src)
+                self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                self.cap.set(cv2.CAP_PROP_FOCUS, 0)
         
         self.video_fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 25
         self.img_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -176,9 +184,30 @@ class BaseHPE(ABC):
             print(f"[INFO] PyNvCodec initialized successfully. Resolution: {self.img_w}x{self.img_h}, FPS: {self.video_fps:.2f}")
 
         except Exception as e:
-            print(f"[ERROR] Failed to initialize PyNvCodec: {e}. Falling back to OpenCV for video decoding.")
+            print(f"[ERROR] Failed to initialize PyNvCodec: {e}. Falling back to PyAV for video decoding.")
             self.is_pynvcodec_enabled = False
-            self._init_opencv_video_capture(input_src) # Fallback
+            try:
+                self._init_pyav_video_capture(input_src) # Fallback to PyAV
+            except Exception as e_av:
+                print(f"[ERROR] Failed to initialize PyAV: {e_av}. Falling back to OpenCV for video decoding.")
+                self._init_opencv_video_capture(input_src) # Fallback to OpenCV
+
+    def _init_pyav_video_capture(self, input_src):
+        print(f"[INFO] Attempting to connect to video stream/file at {input_src} using PyAV...")
+        try:
+            self.container = av.open(input_src)
+            self.stream = self.container.streams.video[0]
+            self.stream.thread_type = "AUTO" # Enable multi-threading for decoding if available
+
+            self.img_w = self.stream.width
+            self.img_h = self.stream.height
+            self.video_fps = float(self.stream.average_rate) if self.stream.average_rate else 25
+            self.is_pyav_enabled = True
+            print(f"[INFO] PyAV initialized successfully. Resolution: {self.img_w}x{self.img_h}, FPS: {self.video_fps:.2f}")
+
+        except Exception as e:
+            self.is_pyav_enabled = False
+            raise e # Re-raise to be caught by the caller for fallback
 
     @abstractmethod
     def load_model(self):
@@ -234,6 +263,18 @@ class BaseHPE(ABC):
                     print(f"[ERROR] PyNvCodec decoding error: {e}")
                     break # Exit loop on error
 
+        elif self.is_pyav_enabled: # PyAV path
+            print("Starting processing video/stream data with PyAV. Press CTR+C to exit")
+            for frame_av in self.container.decode(self.stream):
+                try:
+                    # Convert PyAV frame to NumPy array (BGR for OpenCV)
+                    frame_np = frame_av.to_ndarray(format="bgr24")
+                    self.process_frame(frame_np, frame_number)
+                    frame_number += 1
+                except Exception as e:
+                    print(f"[ERROR] PyAV processing error: {e}")
+                    break # Exit loop on error
+            
         else:   # OpenCV video/webcam/stream fallback
             print("Starting processing video/webcam data with OpenCV. Press CTR+C to exit")
             while True:
