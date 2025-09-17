@@ -1,0 +1,104 @@
+version: "3.8"
+
+# Simulate a webcam by publishing an H.264 MP4 in realtime to an RTSP server,
+# then consume it from AlphaPose over the Compose network.
+
+services:
+  streamer:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8554:8554"  # RTSP
+      - "8888:8888"  # HLS/HTTP (optional)
+
+  publisher:
+    image: jrottenberg/ffmpeg:8.0-ubuntu
+    container_name: file_publisher
+    restart: unless-stopped
+    depends_on:
+      - streamer
+    volumes:
+      - ./media:/media:ro
+      - ./publisher.sh:/publisher.sh:ro
+    environment:
+      - FILE=${FILE:-/media/input.mp4}
+      - STREAM_PATH=${STREAM_PATH:-cam}
+      - RTSP_HOST=streamer
+      - RTSP_PORT=8554
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
+      # LOOP unset by default (no loop). Set to -1 for infinite.
+      - LOOP=${LOOP:-}
+      - TRANSCODE=${TRANSCODE:-auto}
+      - VCODEC=${VCODEC:-libx264}
+      - PRESET=${PRESET:-veryfast}
+      - CRF=${CRF:-23}
+      - FRAMERATE=${FRAMERATE:-}
+      - GOP=${GOP:-}
+    entrypoint: ["bash","/publisher.sh"]
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "ffprobe -v error -rtsp_transport tcp -timeout 2000000 -select_streams v:0 -show_streams -of csv=p=0 rtsp://streamer:8554/${STREAM_PATH:-cam} | grep -q video"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  alphapose:
+    build:
+      context: ../..
+      dockerfile: docker/alphapose/Dockerfile
+    image: alphapose:cuda
+    container_name: alphapose_hpe
+    restart: unless-stopped
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Force RTSP over TCP, add reconnects/timeouts for stability
+      - OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:-rtsp_transport;tcp|stimeout;5000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;2}
+      - URL=rtsp://streamer:8554/${STREAM_PATH:-cam}
+      - CFG=${CFG:-configs/coco/resnet/256x192_res50_lr1e-3_1x.yaml}
+      - CKPT=${CKPT}
+      - GPU_INDEX=${GPU_INDEX:-0}
+      - EXTRA_ARGS_STR=${EXTRA_ARGS_STR:-}
+    volumes:
+      - ${OUT_DIR:-../alphapose_out}:/out
+      - ${WEIGHTS_DIR:-../weights}:/weights:ro
+    working_dir: /app
+    # Compose GPU handling varies; the below works in Swarm/compatibility modes.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      bash -lc 'set -e;
+      : "${URL:?URL is required}"; : "${CFG:?CFG is required}"; : "${CKPT:?CKPT is required}";
+      PYARGS=( "python" "demo.py" "--video" "$URL" "--outdir" "/out" "--save_video" "--vis"
+               "--device" "${GPU_INDEX:-0}" "--cfg" "/app/$CFG" "--checkpoint" "/weights/$(basename "$CKPT")" );
+      if [[ -n "${EXTRA_ARGS_STR:-}" ]]; then read -r -a EXTRA_ARR <<< "$EXTRA_ARGS_STR"; PYARGS+=( "${EXTRA_ARR[@]}" ); fi;
+      exec "${PYARGS[@]}"'
+    depends_on:
+      publisher:
+        condition: service_healthy
+      streamer:
+        condition: service_started
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_INTERVAL=10
+      - AUTOHEAL_START_PERIOD=60
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  default:
+    name: hpe_net

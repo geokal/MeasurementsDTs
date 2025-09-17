@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  alphapose:
+    build:
+      context: ..
+      dockerfile: latest_alphapose/Dockerfile
+    image: alphapose:cuda
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - OPENCV_FFMPEG_CAPTURE_OPTIONS=${OPENCV_FFMPEG_CAPTURE_OPTIONS:-}
+      - EXTRA_ARGS_STR=${EXTRA_ARGS_STR:-}
+      - URL=${URL}
+      - CFG=${CFG}
+      - CKPT=${CKPT}
+      - DET=${DET:-}
+      - DET_CKPT=${DET_CKPT:-}
+      - GPU_INDEX=${GPU_INDEX:-0}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+    volumes:
+      - ${OUT_DIR:-./alphapose_out}:/out
+      - ${WEIGHTS_DIR:-./latest_alphapose/weights}:/weights:ro
+      # If CFG is a host file path, you can also bind its directory:
+      # - ${CFG_DIR:-.}:/cfg:ro
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      bash -lc 'set -e;
+      : "${URL:?URL is required}"; : "${CFG:?CFG is required}"; : "${CKPT:?CKPT is required}";
+      # Resolve CFG path: if a file exists at /cfg/$(basename) use that, else fall back to /app/$CFG
+      CFG_BN="$(basename "$CFG")";
+      CFG_IN_CTN="/app/$CFG";
+      if [[ -f "/cfg/$CFG_BN" ]]; then CFG_IN_CTN="/cfg/$CFG_BN"; fi;
+      PYARGS=( "python" "demo.py" "--video" "$URL" "--outdir" "/out" "--save_video" "--vis"
+               "--device" "${GPU_INDEX:-0}" "--cfg" "$CFG_IN_CTN" "--checkpoint" "/weights/$(basename "$CKPT")" );
+      if [[ -n "${DET:-}" ]]; then PYARGS+=( "--detector" "$DET" ); fi;
+      if [[ -n "${DET_CKPT:-}" ]]; then PYARGS+=( "--detector-weights" "/weights/$(basename "$DET_CKPT")" ); fi;
+      if [[ -n "${EXTRA_ARGS_STR:-}" ]]; then read -r -a EXTRA_ARR <<< "$EXTRA_ARGS_STR"; PYARGS+=( "${EXTRA_ARR[@]}" ); fi;
+      exec "${PYARGS[@]}"'

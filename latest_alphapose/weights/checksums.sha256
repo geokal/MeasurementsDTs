@@ -1,0 +1,5 @@
+# Fill with lines in standard sha256sum format:
+# <sha256sum>  <filename>
+# Example (replace with actual values from your files):
+# d41d8cd98f00b204e9800998ecf8427e  fast_res50_256x192.pth
+# d41d8cd98f00b204e9800998ecf8427e  yolox_x.pth

@@ -1,0 +1,18 @@
+# Minimal MediaMTX configuration. Default settings are usually fine.
+# Exposes RTSP on :8554 and HLS/HTTP on :8888.
+
+logLevel: info
+
+rtsp: yes
+rtspAddress: :8554
+
+hls: yes
+hlsAddress: :8888
+
+# Allow any path to be published/played (default behavior).
+paths:
+  all:
+    # No auth, no runOn* hooks here. The publisher service pushes via RTSP.
+    # You can restrict to a single path by naming it explicitly instead of 'all'.
+    # Example:
+    # cam: {}
